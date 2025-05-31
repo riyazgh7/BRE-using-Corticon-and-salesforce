@@ -1,0 +1,83 @@
+/*
+Eligibility Evaluation via Corticon Integration
+-------------------------------------------------
+This Apex class evaluates eligibility for a Case by sending data to Corticon (AWS-hosted) via HTTP callout.
+It gathers Case and related Individual data, constructs a JSON request, and interprets the Corticon JSON response.
+*/
+
+public with sharing class EligibilityEvaluator {
+
+    @AuraEnabled
+    public static void evaluateEligibility(Id caseId) {
+        // Step 1: Fetch Case
+        Case caseRecord = [
+            SELECT Id, Already_Having_Benefit__c, Benefit_Award_Date__c, State__c
+            FROM Case WHERE Id = :caseId
+        ];
+
+        // Step 2: Fetch Individuals related to the Case
+        List<Individual> individuals = [
+            SELECT Id, Type__c, Date_of_Birth__c, DOB_Verified__c, Citizenship__c, Citizenship_Verified__c, 
+                   Disability_Status__c, Income__c
+            FROM Individual WHERE Case__c = :caseId
+        ];
+
+        // Step 3: Construct Request JSON
+        Map<String, Object> requestBody = new Map<String, Object>();
+        requestBody.put('case', new Map<String, Object>{
+            'alreadyHavingBenefit' => caseRecord.Already_Having_Benefit__c,
+            'benefitAwardDate' => caseRecord.Benefit_Award_Date__c,
+            'state' => caseRecord.State__c
+        });
+
+        List<Map<String, Object>> individualList = new List<Map<String, Object>>();
+
+        for (Individual ind : individuals) {
+            individualList.add(new Map<String, Object>{
+                'type' => ind.Type__c,
+                'dob' => ind.Date_of_Birth__c,
+                'dobVerified' => ind.DOB_Verified__c,
+                'citizenship' => ind.Citizenship__c,
+                'citizenshipVerified' => ind.Citizenship_Verified__c,
+                'disabled' => ind.Disability_Status__c,
+                'income' => ind.Income__c
+            });
+        }
+
+        requestBody.put('individuals', individualList);
+
+        // Step 4: Serialize to JSON
+        String jsonInput = JSON.serialize(requestBody);
+
+        // Step 5: HTTP callout to Corticon
+        Http http = new Http();
+        HttpRequest request = new HttpRequest();
+        request.setEndpoint('callout:Corticon_API_Endpoint/eligibility'); // Replace with actual path
+        request.setMethod('POST');
+        request.setHeader('Content-Type', 'application/json');
+        request.setBody(jsonInput);
+
+        HttpResponse response = http.send(request);
+
+        if (response.getStatusCode() == 200) {
+            Map<String, Object> responseBody = (Map<String, Object>) JSON.deserializeUntyped(response.getBody());
+
+            // Step 6: Extract response values
+            String status = (String) responseBody.get('eligibilityStatus');
+            Decimal amount = (Decimal) responseBody.get('eligibleAmount');
+            String reasons = (String) responseBody.get('ineligibilityReasons');
+
+            // Step 7: Create Eligibility Result
+            Eligibility_Result__c result = new Eligibility_Result__c(
+                Case__c = caseId,
+                Eligibility_Status__c = status,
+                Eligible_Amount__c = amount,
+                Ineligibility_Reasons__c = reasons
+            );
+            insert result;
+
+        } else {
+            throw new AuraHandledException('Failed to contact Corticon: ' + response.getStatus());
+        }
+    }
+}
